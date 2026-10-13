@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -21,7 +20,44 @@ type AppSession = {
   name?: string;
 };
 
+type BookingSettings = {
+  id: number;
+  opens_at: string | null;
+  closes_at: string | null;
+  enabled: boolean;
+} | null;
+
 const TOTAL_SEATS = 28;
+
+function formatCountdown(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  const pad = (value: number) =>
+    String(value).padStart(2, "0");
+
+  if (days > 0) {
+    return `${days} วัน ${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+function formatThaiDateTime(timestamp: number | null) {
+  if (timestamp === null || !Number.isFinite(timestamp)) {
+    return "";
+  }
+
+  return new Date(timestamp).toLocaleString("th-TH", {
+    timeZone: "Asia/Bangkok",
+    dateStyle: "long",
+    timeStyle: "short",
+  });
+}
 
 export default function SeatApp() {
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -33,7 +69,15 @@ export default function SeatApp() {
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  // โหลดสถานะโต๊ะจาก API
+  // ข้อมูลเวลาเปิดและปิดการเลือกโต๊ะ
+  const [bookingSettings, setBookingSettings] =
+    useState<BookingSettings>(null);
+
+  // ใช้เวลาจากเซิร์ฟเวอร์ช่วยให้ตัวนับถอยหลังแม่นยำขึ้น
+  const [clock, setClock] = useState(Date.now());
+  const [serverTimeOffset, setServerTimeOffset] = useState(0);
+
+  // โหลดสถานะโต๊ะและเวลาเปิดจาก API
   const refreshState = useCallback(async () => {
     try {
       const response = await fetch("/api/state", {
@@ -63,6 +107,14 @@ export default function SeatApp() {
         }));
 
       setBookings(selected);
+      setBookingSettings(result.settings ?? null);
+
+      // เทียบเวลาจากเซิร์ฟเวอร์กับเวลาบนอุปกรณ์
+      const serverTimestamp = Date.parse(result.now);
+
+      if (Number.isFinite(serverTimestamp)) {
+        setServerTimeOffset(serverTimestamp - Date.now());
+      }
 
       const session: AppSession | null = result.session;
 
@@ -77,15 +129,27 @@ export default function SeatApp() {
       return true;
     } catch (error) {
       console.error("refreshState:", error);
+
       setMessage(
         error instanceof Error
           ? error.message
           : "โหลดข้อมูลไม่สำเร็จ"
       );
+
       return false;
     }
   }, []);
 
+  // อัปเดตนาฬิกาทุกวินาที
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClock(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // โหลดครั้งแรกและตรวจสถานะฐานข้อมูลทุก 15 วินาที
   useEffect(() => {
     async function initialize() {
       await refreshState();
@@ -93,7 +157,39 @@ export default function SeatApp() {
     }
 
     void initialize();
+
+    const refreshTimer = window.setInterval(() => {
+      void refreshState();
+    }, 15000);
+
+    return () => window.clearInterval(refreshTimer);
   }, [refreshState]);
+
+  // คำนวณสถานะเวลาเปิดเลือกโต๊ะ
+  const nowMs = clock + serverTimeOffset;
+
+  const opensAtMs = bookingSettings?.opens_at
+    ? Date.parse(bookingSettings.opens_at)
+    : null;
+
+  const closesAtMs = bookingSettings?.closes_at
+    ? Date.parse(bookingSettings.closes_at)
+    : null;
+
+  const isBeforeOpen =
+    opensAtMs !== null &&
+    Number.isFinite(opensAtMs) &&
+    nowMs < opensAtMs;
+
+  const isAfterClose =
+    closesAtMs !== null &&
+    Number.isFinite(closesAtMs) &&
+    nowMs >= closesAtMs;
+
+  const isBookingOpen =
+    bookingSettings?.enabled === true &&
+    !isBeforeOpen &&
+    !isAfterClose;
 
   // เข้าสู่ระบบนักเรียน
   async function enter() {
@@ -147,6 +243,18 @@ export default function SeatApp() {
       return;
     }
 
+    if (!isBookingOpen) {
+      if (isBeforeOpen) {
+        setMessage("ยังไม่ถึงเวลาเปิดเลือกโต๊ะ");
+      } else if (isAfterClose) {
+        setMessage("หมดเวลาการเลือกโต๊ะแล้ว");
+      } else {
+        setMessage("ระบบเลือกโต๊ะยังไม่เปิด กรุณาติดต่อแอดมิน");
+      }
+
+      return;
+    }
+
     setLoading(true);
     setMessage("");
 
@@ -168,6 +276,7 @@ export default function SeatApp() {
       }
 
       setMessage(result.message || `เลือกโต๊ะหมายเลข ${seatNo} สำเร็จ`);
+
       await refreshState();
     } catch (error) {
       console.error("chooseSeat:", error);
@@ -218,6 +327,80 @@ export default function SeatApp() {
         <p>เข้าสู่ระบบด้วยเลขประจำตัวและชื่อ-นามสกุล</p>
       </section>
 
+      {/* สถานะเวลาเปิดระบบ */}
+      <section className="panel" aria-live="polite">
+        {!bookingSettings ? (
+          <>
+            <h2>กำลังตรวจสอบเวลาเปิดระบบ</h2>
+            <p className="muted">
+              ไม่พบข้อมูลกำหนดเวลา กรุณาตรวจสอบการตั้งค่าระบบ
+            </p>
+          </>
+        ) : isBeforeOpen ? (
+          <>
+            <h2>ระบบจะเปิดให้เลือกโต๊ะ</h2>
+
+            <p className="muted">
+              กำหนดเปิดเวลา {formatThaiDateTime(opensAtMs)}
+            </p>
+
+            <div
+              style={{
+                textAlign: "center",
+                margin: "20px 0",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "clamp(2rem, 8vw, 3.5rem)",
+                  fontWeight: 800,
+                  fontVariantNumeric: "tabular-nums",
+                  letterSpacing: "0.04em",
+                }}
+              >
+                {formatCountdown(opensAtMs! - nowMs)}
+              </div>
+
+              <p className="muted">
+                วัน : ชั่วโมง : นาที : วินาที
+              </p>
+            </div>
+
+            {bookingSettings.enabled ? (
+              <p className="muted">
+                เมื่อเวลานับถอยหลังหมด ระบบจะเปิดให้เลือกโต๊ะอัตโนมัติ
+              </p>
+            ) : (
+              <p className="notice">
+                ระบบยังปิดอยู่ ต้องเปิดสถานะระบบในหน้าแอดมินไว้ล่วงหน้า
+                จึงจะเลือกโต๊ะได้เมื่อถึงเวลา
+              </p>
+            )}
+          </>
+        ) : isAfterClose ? (
+          <>
+            <h2>หมดเวลาการเลือกโต๊ะแล้ว</h2>
+            <p className="muted">
+              ขณะนี้เลยเวลาปิดรับเลือกโต๊ะแล้ว
+            </p>
+          </>
+        ) : !bookingSettings.enabled ? (
+          <>
+            <h2>ระบบเลือกโต๊ะยังปิดอยู่</h2>
+            <p className="muted">
+              กรุณารอให้แอดมินเปิดระบบ
+            </p>
+          </>
+        ) : (
+          <>
+            <h2>ระบบเปิดให้เลือกโต๊ะแล้ว!</h2>
+            <p className="muted">
+              สามารถเข้าสู่ระบบและเลือกโต๊ะที่ว่างได้เลย
+            </p>
+          </>
+        )}
+      </section>
+
       <section className="panel">
         <h2>เข้าสู่ระบบนักเรียน</h2>
 
@@ -250,6 +433,7 @@ export default function SeatApp() {
         ) : (
           <div>
             <p>สวัสดี {activeName}</p>
+
             <button
               className="secondary"
               onClick={changeName}
@@ -270,6 +454,7 @@ export default function SeatApp() {
               <b>{Math.max(0, TOTAL_SEATS - bookings.length)}</b>
               <span>โต๊ะว่าง</span>
             </div>
+
             <div>
               <b>{bookings.length}</b>
               <span>มีคนเลือกแล้ว</span>
@@ -277,17 +462,30 @@ export default function SeatApp() {
           </div>
 
           <h2>เลือกโต๊ะของคุณ</h2>
+
           <p className="muted">
             สีเขียว = ว่าง · สีเทา = มีคนเลือกแล้ว ·
             สีน้ำเงิน = โต๊ะของคุณ
           </p>
 
+          {!isBookingOpen && (
+            <p className="notice">
+              {isBeforeOpen
+                ? "ยังไม่ถึงเวลาเปิดเลือกโต๊ะ"
+                : isAfterClose
+                  ? "หมดเวลาการเลือกโต๊ะแล้ว"
+                  : "ระบบเลือกโต๊ะยังปิดอยู่"}
+            </p>
+          )}
+
           <div className="grid">
             {Array.from({ length: TOTAL_SEATS }, (_, index) => {
               const seatNo = index + 1;
+
               const booking = bookings.find(
                 (item) => item.seat_no === seatNo
               );
+
               const mine =
                 booking?.student_id === activeStudentId;
 
@@ -301,10 +499,15 @@ export default function SeatApp() {
                         ? "occupied"
                         : "available"
                   }`}
-                  disabled={!!booking || loading}
+                  disabled={
+                    !!booking ||
+                    loading ||
+                    !isBookingOpen
+                  }
                   onClick={() => chooseSeat(seatNo)}
                 >
                   <b>{seatNo}</b>
+
                   <span>
                     {mine
                       ? "ของฉัน"
@@ -312,6 +515,7 @@ export default function SeatApp() {
                         ? "ไม่ว่าง"
                         : "ว่าง"}
                   </span>
+
                   {booking && <small>{booking.name}</small>}
                 </button>
               );
