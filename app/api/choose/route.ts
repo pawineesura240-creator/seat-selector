@@ -7,7 +7,7 @@ export async function POST(req: Request) {
   try {
     const { seatNo } = await req.json();
     if (!Number.isInteger(seatNo) || seatNo < 1 || seatNo > 28) return NextResponse.json({ error: "หมายเลขโต๊ะไม่ถูกต้อง" }, { status: 400 });
-    const { data, error } = await db().rpc("choose_seat", { p_student_id: session.studentId, p_student_name: session.name, p_seat_no: seatNo });
+        const { data, error } = await db().rpc("choose_seat", { p_student_id: session.studentId, p_student_name: session.name, p_seat_no: seatNo });
     if (error) {
       const msg = error.message || "";
       if (msg.includes("SELECTION_CLOSED")) return NextResponse.json({ error: "ขณะนี้ยังไม่เปิดหรือหมดเวลาเลือกโต๊ะแล้ว" }, { status: 403 });
